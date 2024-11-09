@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: cron setting for AWS Batch
+
+Parameters:
+  ServiceName:
+    Default: aws-batch-sample
+    Description: Name of the service
+    Type: String
+  JobDefinitionName:
+    Default: dynamodb-export
+    Description: Name of the AWS Batch job definition
+    Type: String
+  BatchJobQueueName:
+    Default: default
+    Description: Name of the AWS Batch job queue
+    Type: String
+  Env:
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prod
+    Description: Deployment environment
+
+Resources:
+  # EventBridge Rule for Scheduled Batch Job
+  BatchJobScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ServiceName}-JobScheduleRule-${Env}"
+      Description: "EventBridge rule to trigger AWS Batch job at 2:00 AM JST daily"
+      ScheduleExpression: "cron(0 17 * * ? *)"  # 日本時間 午前2時に対応するUTC時間 (前日の17:00)
+      State: ENABLED
+      Targets:
+        - Id: "BatchJobTarget"
+          Arn: !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-queue/${BatchJobQueueName}"
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          BatchParameters:
+            JobDefinition: !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/${JobDefinitionName}"
+            JobName: !Sub "${ServiceName}-scheduled-job"
+            RetryStrategy:
+              Attempts: 1
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ServiceName}-EventBridgeRole-${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: BatchSubmitJobPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "batch:SubmitJob"
+                Resource:
+                  - !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/${JobDefinitionName}"
+                  - !Sub "arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-queue/${BatchJobQueueName}"
+      Path: /
+
+Outputs:
+  BatchJobScheduleRule:
+    Description: "EventBridgeルールで日本時間午前2時に起動するバッチ"
+    Value: !Ref BatchJobScheduleRule
+
+  EventBridgeRole:
+    Description: "EventBridgeからAWS Batchを定期実行するロール"
+    Value: !Ref EventBridgeRole

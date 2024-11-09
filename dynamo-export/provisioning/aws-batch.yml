@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS Batch Fargate setup with subnet as input parameter
+
+Parameters:
+  Env:
+    AllowedValues:
+      - dev
+      - stg
+      - prod
+    Default: dev
+    Description: input your Profile.
+    Type: String
+  ServiceName:
+    Default: aws-batch-sample
+    Description: input your ServiceName.
+    Type: String
+  JobDefinitionName:
+    Default: dynamodb-export
+    Description: input your JobDefinitionName.
+    Type: String
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnet IDs for Fargate tasks
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the security group
+  ImageUri:
+    Type: String
+    Description: URI of the Docker image to run in the Fargate task
+  Vcpus:
+    AllowedValues: [1, 2]
+    Type: Number
+    Description: Number of vCPUs to allocate for the Fargate task
+    Default: 1
+  Memory:
+    AllowedValues: [512, 1024, 2048, 4096]
+    Type: Number
+    Description: Amount of memory in MiB to allocate for the Fargate task
+    Default: 2048
+
+Resources:
+  # Security Group for Fargate Tasks
+  BatchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for AWS Batch Fargate tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []  # 外部からのインバウンドは不要
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  # IAM Role for AWS Batch Service
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - batch.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+      RoleName:
+        Fn::Sub: ${ServiceName}-BatchServiceRole-${Env}
+      Path: /
+
+  # IAM Role for Batch Execution
+  BatchExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      RoleName:
+        Fn::Sub: ${ServiceName}-BatchExecutionRole-${Env}
+      Path: /
+
+  # IAM Role for Job
+  BatchJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      RoleName:
+        Fn::Sub: ${ServiceName}-BatchJobRole-${Env}
+      Path: /
+
+  # Fargate Compute Environment
+  BatchFargateComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      ComputeResources:
+        Type: FARGATE
+        MaxvCpus: 16  # 必要に応じて調整
+        Subnets: !Ref Subnets
+        SecurityGroupIds:
+          - !Ref BatchSecurityGroup
+      ServiceRole: !Ref BatchServiceRole
+
+  # Job Queue
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref BatchFargateComputeEnvironment
+      Priority: 1
+
+  # Job Definition
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: Container
+      JobDefinitionName: !Ref JobDefinitionName
+      PlatformCapabilities:
+        - FARGATE
+      ContainerProperties:
+        Image: !Ref ImageUri
+        Command: ["python", "lambda_handler/lambda_handler.py"]
+        ResourceRequirements:
+          - Type: MEMORY
+            Value: !Ref Memory
+          - Type: VCPU
+            Value: !Ref Vcpus
+        Environment:
+          - Name: AWS_REGION
+            Value: ap-northeast-1
+          - Name: DYNAMODB_TABLE
+            Value: "CognitoUserBackup"
+          - Name: S3_DESTINATION_BUCKET
+            Value: "your-destination-bucket"
+          - Name: S3_DESTINATION_KEY
+            Value: "output.csv"
+        ExecutionRoleArn: !GetAtt BatchExecutionRole.Arn
+        JobRoleArn: !GetAtt BatchJobRole.Arn
+        NetworkConfiguration:
+          AssignPublicIp: ENABLED
+      RetryStrategy:
+        Attempts: 3
+
+Outputs:
+  BatchJobQueueName:
+    Description: Name of the Batch Job Queue
+    Value: !Ref BatchJobQueue
+  BatchJobDefinitionName:
+    Description: Name of the Batch Job Definition
+    Value: !Ref BatchJobDefinition
+  BatchSecurityGroupId:
+    Description: Security Group ID used by Fargate Compute Environment
+    Value: !Ref BatchSecurityGroup
